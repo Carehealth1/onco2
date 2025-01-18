@@ -1,3 +1,4 @@
 streamlit
 anthropic>=0.7.0
 PyPDF2
+plotly
