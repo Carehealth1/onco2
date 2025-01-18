@@ -1,259 +1,260 @@
 import streamlit as st
-import anthropic
 import json
+from typing import Dict, List
 import pandas as pd
-from PyPDF2 import PdfReader
-import io
-import re
-from datetime import datetime
-import streamlit.components.v1 as components
+import plotly.express as px
+import datetime
 
-def initialize_session_state():
-    if 'messages' not in st.session_state:
-        st.session_state.messages = []
-    
-    if 'current_regimen' not in st.session_state:
-        st.session_state.current_regimen = {
-            'diagnosis': '',
-            'regimen_name': '',
-            'phases': {
-                'Phase 1': {
-                    'pretreatment': [],
-                    'chemotherapy': [],
-                    'targeted_therapy': [],
-                    'cycle_details': {}
-                },
-                'Phase 2': {
-                    'pretreatment': [],
-                    'chemotherapy': [],
-                    'targeted_therapy': [],
-                    'cycle_details': {}
-                }
-            }
-        }
-    
-    if 'active_view' not in st.session_state:
-        st.session_state.active_view = "chat"
-
-def process_pdf_with_claude(file_content):
-    client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
-    
-    prompt = """Extract the following information from this chemotherapy order template:
-    1. Diagnosis
-    2. Treatment regimen name
-    3. Pre-treatment medications (name, dose, route, timing)
-    4. Chemotherapy medications (name, dose, route, infusion time)
-    5. Targeted therapy details
-    6. Cycle information
-    
-    Format the response as JSON with this structure:
-    {
-        "diagnosis": "string",
-        "regimen_name": "string",
-        "phase1": {
-            "pretreatment": [{
-                "name": "string",
-                "dose": "string",
-                "route": "string",
-                "timing": "string"
-            }],
-            "chemotherapy": [{
-                "name": "string",
-                "dose": "string",
-                "route": "string",
-                "infusion_time": "string"
-            }],
-            "targeted_therapy": [{
-                "name": "string",
-                "dosing": [{
-                    "week": "string",
-                    "dose": "string",
-                    "route": "string",
-                    "infusion_time": "string"
-                }]
-            }]
-        }
-    }
-    
-    PDF Content:
-    {file_content}
-    """
-    
+def load_json_file(uploaded_file) -> Dict:
+    """Load and parse the uploaded JSON file"""
     try:
-        response = client.messages.create(
-            model="claude-3-opus-20240229",
-            max_tokens=4000,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', response.content[0].text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-        return None
+        content = uploaded_file.read()
+        return json.loads(content)
     except Exception as e:
-        st.error(f"Error processing PDF: {str(e)}")
+        st.error(f"Error loading JSON file: {str(e)}")
         return None
 
-def update_regimen_data(extracted_data):
-    try:
-        # Update basic information
-        st.session_state.current_regimen['diagnosis'] = extracted_data.get('diagnosis', '')
-        st.session_state.current_regimen['regimen_name'] = extracted_data.get('regimen_name', '')
-        
-        # Update Phase 1 data
-        if 'phase1' in extracted_data:
-            phase1_data = extracted_data['phase1']
-            st.session_state.current_regimen['phases']['Phase 1'] = {
-                'pretreatment': phase1_data.get('pretreatment', []),
-                'chemotherapy': phase1_data.get('chemotherapy', []),
-                'targeted_therapy': phase1_data.get('targeted_therapy', []),
-                'cycle_details': phase1_data.get('cycle_details', {})
-            }
-        
-        return True
-    except Exception as e:
-        st.error(f"Error updating regimen data: {str(e)}")
-        return False
+def get_treatment_courses(data: Dict) -> List[Dict]:
+    """Extract treatment courses from the JSON data"""
+    courses = []
+    for key, value in data.items():
+        if key.startswith("course"):
+            courses.append(value)
+    return courses
 
-def create_react_component():
-    # Create JSON data for React component
-    component_data = {
-        'diagnosis': st.session_state.current_regimen['diagnosis'],
-        'regimen_name': st.session_state.current_regimen['regimen_name'],
-        'phase1': st.session_state.current_regimen['phases']['Phase 1']
-    }
+def create_cycle_calendar(course: Dict, cycle_num: int):
+    """Create a daily view calendar for a specific cycle"""
+    cycle_length = course["cycle_length"]
+    calendar_data = []
     
-    # Inject data into React component
-    react_code = f"""
-    <script>
-        window.regimen_data = {json.dumps(component_data)};
-    </script>
-    """
+    for day in range(1, cycle_length + 1):
+        day_drugs = []
+        for drug in course["drugs"]:
+            # Check for single day treatment
+            if "day" in drug and drug["day"] == day:
+                day_drugs.append({
+                    "name": drug["name"],
+                    "dose": drug["dose"],
+                    "route": drug["route"]
+                })
+            # Check for multiple day treatment
+            elif "days" in drug and day in drug["days"]:
+                dose = drug["maintenance_dose"] if day > 1 else drug["loading_dose"]
+                day_drugs.append({
+                    "name": drug["name"],
+                    "dose": dose,
+                    "route": drug["route"]
+                })
+        
+        calendar_data.append({
+            "day": day,
+            "drugs": day_drugs,
+            "has_treatment": len(day_drugs) > 0
+        })
     
-    components.html(react_code, height=0)
+    return calendar_data
 
-def display_regimen_data():
-    st.subheader("Current Regimen Data")
+def display_cycle_calendar(course: Dict, cycle_num: int):
+    """Display the calendar view for a specific cycle"""
+    calendar_data = create_cycle_calendar(course, cycle_num)
     
-    # Display basic information
-    col1, col2 = st.columns(2)
-    with col1:
-        st.text_input("Diagnosis", st.session_state.current_regimen['diagnosis'], key='diagnosis')
-    with col2:
-        st.text_input("Regimen Name", st.session_state.current_regimen['regimen_name'], key='regimen_name')
+    # Create calendar grid
+    cols = st.columns(7)
+    for idx, day_data in enumerate(calendar_data):
+        day = day_data["day"]
+        with cols[idx % 7]:
+            # Create a container for each day
+            with st.container(border=True):
+                # Day header
+                if day_data["has_treatment"]:
+                    st.markdown(f"**Day {day}** 🏥")
+                else:
+                    st.markdown(f"**Day {day}**")
+                
+                # Display treatments for the day
+                if day_data["drugs"]:
+                    for drug in day_data["drugs"]:
+                        st.markdown(f"""
+                        💊 **{drug['name']}**  
+                        Dose: {drug['dose']}  
+                        Route: {drug['route']}
+                        """)
+                else:
+                    st.write("No treatments")
+        
+        # Add a line break after each week
+        if (idx + 1) % 7 == 0:
+            st.write("")
+
+def create_treatment_timeline(courses: List[Dict]):
+    """Create a Gantt chart showing all treatment phases and cycles"""
+    timeline_data = []
+    current_date = datetime.datetime.now()
     
-    # Create tabs for phases
-    phase_tabs = st.tabs(["Phase 1", "Phase 2"])
+    for course_idx, course in enumerate(courses):
+        course_name = course["name"]
+        cycle_length = course["cycle_length"]
+        num_cycles = course["cycles"]
+        
+        if course_idx > 0:
+            previous_course = courses[course_idx - 1]
+            current_date += datetime.timedelta(days=previous_course["cycles"] * previous_course["cycle_length"])
+        
+        for cycle in range(1, num_cycles + 1):
+            cycle_start = current_date + datetime.timedelta(days=(cycle-1)*cycle_length)
+            
+            for drug in course["drugs"]:
+                # Handle single day treatments
+                if "day" in drug:
+                    drug_start = cycle_start + datetime.timedelta(days=drug["day"]-1)
+                    drug_end = drug_start + datetime.timedelta(days=1)
+                    timeline_data.append({
+                        "Course": course_name,
+                        "Cycle": f"Cycle {cycle}",
+                        "Drug": drug["name"],
+                        "Start": drug_start,
+                        "Finish": drug_end
+                    })
+                # Handle multiple day treatments
+                elif "days" in drug:
+                    for day in drug["days"]:
+                        drug_start = cycle_start + datetime.timedelta(days=day-1)
+                        drug_end = drug_start + datetime.timedelta(days=1)
+                        timeline_data.append({
+                            "Course": course_name,
+                            "Cycle": f"Cycle {cycle}",
+                            "Drug": drug["name"],
+                            "Start": drug_start,
+                            "Finish": drug_end
+                        })
     
-    for i, phase in enumerate(["Phase 1", "Phase 2"]):
-        with phase_tabs[i]:
-            phase_data = st.session_state.current_regimen['phases'][phase]
-            
-            # Pre-treatment medications
-            st.markdown("##### Pre-treatment Medications")
-            if phase_data['pretreatment']:
-                df_pretreat = pd.DataFrame(phase_data['pretreatment'])
-                edited_pretreat = st.data_editor(
-                    df_pretreat,
-                    num_rows="dynamic",
-                    hide_index=True
-                )
-                # Update data if edited
-                if not df_pretreat.equals(edited_pretreat):
-                    st.session_state.current_regimen['phases'][phase]['pretreatment'] = edited_pretreat.to_dict('records')
-            
-            # Chemotherapy medications
-            st.markdown("##### Chemotherapy")
-            if phase_data['chemotherapy']:
-                df_chemo = pd.DataFrame(phase_data['chemotherapy'])
-                edited_chemo = st.data_editor(
-                    df_chemo,
-                    num_rows="dynamic",
-                    hide_index=True
-                )
-                # Update data if edited
-                if not df_chemo.equals(edited_chemo):
-                    st.session_state.current_regimen['phases'][phase]['chemotherapy'] = edited_chemo.to_dict('records')
-            
-            # Targeted therapy
-            st.markdown("##### Targeted Therapy")
-            if phase_data['targeted_therapy']:
-                for therapy in phase_data['targeted_therapy']:
-                    st.markdown(f"###### {therapy['name']}")
-                    df_dosing = pd.DataFrame(therapy['dosing'])
-                    edited_dosing = st.data_editor(
-                        df_dosing,
-                        num_rows="dynamic",
-                        hide_index=True
-                    )
-                    # Update data if edited
-                    if not df_dosing.equals(edited_dosing):
-                        therapy['dosing'] = edited_dosing.to_dict('records')
+    if not timeline_data:
+        return None
+        
+    df = pd.DataFrame(timeline_data)
+    
+    fig = px.timeline(df, 
+                     x_start="Start", 
+                     x_end="Finish", 
+                     y="Course",
+                     color="Drug",
+                     title="Treatment Timeline",
+                     hover_data=["Cycle"])
+    
+    fig.update_layout(height=300)
+    return fig
 
 def main():
-    st.title("Chemotherapy Regimen Assistant")
-    
-    # Initialize session state
-    initialize_session_state()
-    
-    # Create React component with current data
-    create_react_component()
-    
-    # Sidebar navigation
-    with st.sidebar:
-        st.header("Navigation")
-        view = st.radio("Select View", ["Chat", "Data View"])
-        st.session_state.active_view = view.lower()
-        
-        # File upload
-        uploaded_file = st.file_uploader("Upload PDF", type="pdf")
-        if uploaded_file:
-            with st.spinner("Processing PDF..."):
-                pdf_reader = PdfReader(io.BytesIO(uploaded_file.getvalue()))
-                pdf_text = ""
-                for page in pdf_reader.pages:
-                    pdf_text += page.extract_text()
-                
-                # Process with Claude
-                extracted_data = process_pdf_with_claude(pdf_text)
-                if extracted_data:
-                    if update_regimen_data(extracted_data):
-                        st.success("Successfully extracted regimen data")
-                        # Recreate React component with updated data
-                        create_react_component()
-    
-    # Main content area
-    if st.session_state.active_view == "chat":
-        for message in st.session_state.messages:
-            with st.chat_message(message["role"]):
-                st.markdown(message["content"])
-        
-        if prompt := st.chat_input("Ask about the regimen..."):
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            
-            # Get Claude response
-            response = get_claude_response(prompt)
-            if response:
-                st.session_state.messages.append({"role": "assistant", "content": response})
-    else:
-        display_regimen_data()
+    st.set_page_config(
+        page_title="Treatment Regimen Planner",
+        page_icon="💊",
+        layout="wide"
+    )
 
-def get_claude_response(prompt):
-    client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
+    st.title("Treatment Regimen Planner")
+
+    # File uploader
+    uploaded_file = st.file_uploader("Upload Regimen JSON file", type=['json'])
     
-    try:
-        response = client.messages.create(
-            model="claude-3-opus-20240229",
-            max_tokens=2000,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text
-    except Exception as e:
-        st.error(f"Error getting response: {str(e)}")
-        return None
+    if not uploaded_file:
+        st.info("Please upload a JSON file to view the regimen details.")
+        return
+
+    # Load data
+    data = load_json_file(uploaded_file)
+    if not data:
+        return
+
+    # Get treatment courses
+    courses = get_treatment_courses(data)
+    
+    # Create tabs
+    tab1, tab2, tab3 = st.tabs(["Treatment Calendar", "Regimen Overview", "Timeline"])
+
+    with tab1:
+        st.header("Treatment Calendar")
+        
+        # Course and cycle selection
+        col1, col2 = st.columns(2)
+        with col1:
+            course_idx = st.selectbox(
+                "Select Treatment Course",
+                range(len(courses)),
+                format_func=lambda x: f"Course {x+1}: {courses[x]['name']}"
+            )
+        
+        selected_course = courses[course_idx]
+        
+        with col2:
+            cycle_num = st.selectbox(
+                "Select Cycle",
+                range(1, selected_course["cycles"] + 1),
+                format_func=lambda x: f"Cycle {x}"
+            )
+        
+        # Display cycle information
+        st.subheader(f"Course {course_idx + 1} - Cycle {cycle_num} Schedule")
+        st.info(f"""
+        Course: {selected_course['name']}  
+        Cycle Length: {selected_course['cycle_length']} days  
+        Total Cycles in Course: {selected_course['cycles']}
+        """)
+        
+        # Display calendar
+        display_cycle_calendar(selected_course, cycle_num)
+        
+        # Display supportive care
+        st.subheader("Supportive Care")
+        with st.container(border=True):
+            for care in selected_course["supportive_care"]:
+                st.write(f"• {care}")
+
+    with tab2:
+        st.header("Regimen Overview")
+        
+        # Display indication
+        st.subheader("Indication")
+        st.info(data["indication"])
+        
+        # Display courses
+        for course_idx, course in enumerate(courses, 1):
+            with st.expander(f"Course {course_idx}: {course['name']}", expanded=True):
+                st.write(f"**Duration:** {course['cycles']} cycles of {course['cycle_length']} days")
+                
+                st.write("**Drug Schedule:**")
+                for drug in course["drugs"]:
+                    if "day" in drug:
+                        st.write(f"• {drug['name']} ({drug['dose']}) - {drug['route']} on Day {drug['day']}")
+                    elif "days" in drug:
+                        st.write(f"• {drug['name']}")
+                        st.write(f"  - Loading: {drug['loading_dose']} - {drug['route']}")
+                        st.write(f"  - Maintenance: {drug['maintenance_dose']} - {drug['route']}")
+                        st.write(f"  - Days: {', '.join(map(str, drug['days']))}")
+                
+                if "maintenance_trastuzumab" in course:
+                    st.write("\n**Maintenance Trastuzumab:**")
+                    st.write(f"• Duration: {course['maintenance_trastuzumab']['duration']} weeks")
+                    st.write(f"• Dose: {course['maintenance_trastuzumab']['dose']}")
+                
+                st.write("\n**Supportive Care:**")
+                for care in course["supportive_care"]:
+                    st.write(f"• {care}")
+
+    with tab3:
+        st.header("Treatment Timeline")
+        timeline_fig = create_treatment_timeline(courses)
+        if timeline_fig:
+            st.plotly_chart(timeline_fig, use_container_width=True)
+
+    # Add download button for JSON
+    st.sidebar.header("Download Data")
+    json_str = json.dumps(data, indent=2)
+    st.sidebar.download_button(
+        label="Download JSON",
+        data=json_str,
+        file_name="regimen_data.json",
+        mime="application/json"
+    )
 
 if __name__ == "__main__":
     main()
